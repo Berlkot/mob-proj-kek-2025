@@ -1,4 +1,4 @@
-// app/(main)/index.tsx
+// app/(main)/(tabs)/index.tsx
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -12,13 +12,15 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
+
 import { ValidatedInput } from "../../../components/ui/ValidatedInput";
 import {
   calculateGap,
   calculateOsmolality,
   OSMOLALITY_REF_RANGE,
 } from "../../../constants/formulas";
-import { SAFETY_LIMITS, validateInput } from "../../../constants/validation"; // Убедись, что экспортировал SAFETY_LIMITS
+import { SAFETY_LIMITS, validateInput } from "../../../constants/validation";
 import { useAuth } from "../../../contexts/AuthProvider";
 import { supabase } from "../../../lib/supabase";
 import { UnitType } from "../../../types/db";
@@ -26,6 +28,9 @@ import { UnitType } from "../../../types/db";
 export default function CalculatorScreen() {
   const { session } = useAuth();
   const [loading, setLoading] = useState(false);
+
+  // Профиль пользователя (роль)
+  const [userRole, setUserRole] = useState<"doctor" | "patient" | null>(null);
 
   // --- Состояние формы ---
   const [units, setUnits] = useState<UnitType>("mg/dL");
@@ -39,34 +44,54 @@ export default function CalculatorScreen() {
     measured_osmolality: "",
   });
 
-  // Ошибки
   const [errors, setErrors] = useState<Record<string, string | null>>({});
-
-  // Результаты
   const [result, setResult] = useState<{
     calc: number;
     gap: number | null;
   } | null>(null);
   const [currentCaseId, setCurrentCaseId] = useState<string | null>(null);
-
-  // Состояние для хранения AI ответа
   const [aiResult, setAiResult] = useState<any>(null);
   const [aiLoading, setAiLoading] = useState(false);
 
-  // app/(main)/index.tsx
+  // 1. Загружаем роль
+  useEffect(() => {
+    if (session?.user) fetchUserRole();
+  }, [session]);
 
-  const fetchInterpretation = async (context: "doctor" | "patient") => {
-    // Проверка: есть ли ID кейса? (Мы должны сначала сохранить расчёт)
+  const fetchUserRole = async () => {
+    const { data } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", session?.user.id)
+      .single();
+
+    if (data?.role) {
+      const role = data.role === "patient" ? "patient" : "doctor";
+      setUserRole(role);
+    } else {
+      setUserRole("doctor");
+    }
+  };
+
+  // Сброс
+  useEffect(() => {
+    setErrors({});
+    setResult(null);
+    setAiResult(null);
+    setCurrentCaseId(null);
+  }, [units]);
+
+  // --- AI ---
+  const fetchInterpretation = async () => {
     if (!currentCaseId) {
       Alert.alert("Ошибка", "Сначала выполните расчёт");
       return;
     }
-
+    const context = userRole || "doctor";
     setAiLoading(true);
     setAiResult(null);
 
     try {
-      // 1. Формируем payload для Edge Function
       const payload = {
         context: context,
         units: units,
@@ -83,54 +108,33 @@ export default function CalculatorScreen() {
         },
       };
 
-      // 2. Вызываем функцию (она теперь только ГЕНЕРИРУЕТ, но не сохраняет)
       const { data, error } = await supabase.functions.invoke(
         "osmolality-interpret",
-        {
-          body: payload,
-        }
+        { body: payload }
       );
 
       if (error) throw new Error(error.message || "Ошибка вызова AI");
       if (data && data.error) throw new Error(data.error);
 
-      const aiData = data; // Это наш JSON с интерпретацией
-
-      // 3. НОВОЕ: Сохраняем результат в БД прямо с клиента
       if (session?.user) {
-        const { error: dbError } = await supabase
-          .from("llm_interpretations")
-          .insert({
-            case_id: currentCaseId, // ID, который мы сохранили при расчёте
-            user_id: session.user.id,
-            context: context,
-            model: "nvidia/nemotron-3-nano-30b-a3b:free",
-            result_json: aiData,
-            status: "ok",
-          });
-
-        if (dbError) {
-          console.error("Ошибка сохранения AI в БД:", dbError);
-          // Не блокируем показ результата, но предупреждаем в консоль
-        }
+        await supabase.from("llm_interpretations").insert({
+          case_id: currentCaseId,
+          user_id: session.user.id,
+          context: context,
+          model: "nvidia/nemotron-3-nano-30b-a3b:free",
+          result_json: data,
+          status: "ok",
+        });
       }
-
-      setAiResult(aiData);
+      setAiResult(data);
     } catch (e: any) {
       Alert.alert("Ошибка AI", e.message);
     } finally {
       setAiLoading(false);
     }
   };
-  // Сброс при смене единиц
-  useEffect(() => {
-    setErrors({});
-    setResult(null);
-    setAiResult(null);
-    setCurrentCaseId(null);
-  }, [units]);
 
-  // --- Умная валидация при вводе ---
+  // --- Validation & Calc ---
   const handleVerifyField = (
     key: string,
     text: string,
@@ -155,10 +159,10 @@ export default function CalculatorScreen() {
       return { ...prev, [key]: errorMsg };
     });
   };
+
   const handleChange = (key: string, text: string) => {
     setValues((prev) => ({ ...prev, [key]: text }));
     handleVerifyField(key, text, false);
-    // Сброс при изменении данных, чтобы не показывать старый результат
     if (result) setResult(null);
     if (aiResult) setAiResult(null);
     if (currentCaseId) setCurrentCaseId(null);
@@ -167,7 +171,6 @@ export default function CalculatorScreen() {
   const handleBlur = (key: string) =>
     handleVerifyField(key, values[key as keyof typeof values], true);
 
-  // --- Финальная проверка перед расчётом ---
   const validateOnSubmit = () => {
     const keys = ["na", "glucose", "bun", "ethanol", "measured_osmolality"];
     let isValid = true;
@@ -194,7 +197,6 @@ export default function CalculatorScreen() {
       Alert.alert("Ошибка данных", "Проверьте красные поля");
       return;
     }
-
     setLoading(true);
     try {
       const valNa = parseFloat(values.na);
@@ -204,7 +206,6 @@ export default function CalculatorScreen() {
       const valMeasured = values.measured_osmolality
         ? parseFloat(values.measured_osmolality)
         : null;
-
       const calculatedOsm = calculateOsmolality(
         valNa,
         valGlu,
@@ -216,9 +217,7 @@ export default function CalculatorScreen() {
 
       setResult({ calc: calculatedOsm, gap });
 
-      // Сохранение в БД
       if (session?.user) {
-        // 1. Создаем кейс
         const { data: caseData, error: caseError } = await supabase
           .from("cases")
           .insert({
@@ -231,13 +230,8 @@ export default function CalculatorScreen() {
           })
           .select()
           .single();
-
         if (caseError) throw caseError;
-
-        // 2. Запоминаем ID кейса для AI
         setCurrentCaseId(caseData.id);
-
-        // 3. Сохраняем входы
         await supabase.from("case_inputs").insert({
           case_id: caseData.id,
           units: units,
@@ -247,8 +241,6 @@ export default function CalculatorScreen() {
           ethanol: valEth || null,
           measured_osmolality: valMeasured,
         });
-
-        // 4. Сохраняем результаты
         await supabase.from("case_results").insert({
           case_id: caseData.id,
           formula_id: units === "mg/dL" ? "2na_glu_bun_us" : "2na_glu_bun_si",
@@ -273,7 +265,7 @@ export default function CalculatorScreen() {
     });
     setResult(null);
     setAiResult(null);
-    setCurrentCaseId(null); // Сбрасываем ID
+    setCurrentCaseId(null);
     setErrors({});
   };
 
@@ -292,7 +284,43 @@ export default function CalculatorScreen() {
         >
           <Text style={styles.headerTitle}>Осмолярность</Text>
 
-          {/* ... Inputs UI (как раньше) ... */}
+          {/* --- ВОССТАНОВЛЕННЫЙ ПЕРЕКЛЮЧАТЕЛЬ --- */}
+          <View style={styles.toggleContainer}>
+            <TouchableOpacity
+              style={[
+                styles.toggleBtn,
+                units === "mg/dL" && styles.toggleBtnActive,
+              ]}
+              onPress={() => setUnits("mg/dL")}
+            >
+              <Text
+                style={[
+                  styles.toggleText,
+                  units === "mg/dL" && styles.toggleTextActive,
+                ]}
+              >
+                mg/dL (US)
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.toggleBtn,
+                units === "mmol/L" && styles.toggleBtnActive,
+              ]}
+              onPress={() => setUnits("mmol/L")}
+            >
+              <Text
+                style={[
+                  styles.toggleText,
+                  units === "mmol/L" && styles.toggleTextActive,
+                ]}
+              >
+                mmol/L (SI)
+              </Text>
+            </TouchableOpacity>
+          </View>
+          {/* ------------------------------------- */}
+
           <View style={styles.card}>
             <ValidatedInput
               label="Na+"
@@ -350,7 +378,6 @@ export default function CalculatorScreen() {
             <Text style={styles.calcButtonText}>РАССЧИТАТЬ</Text>
           </TouchableOpacity>
 
-          {/* Результаты Расчета */}
           {result && (
             <View style={styles.resultContainer}>
               <View style={styles.resultRow}>
@@ -361,7 +388,7 @@ export default function CalculatorScreen() {
                     isAbnormal(result.calc) ? styles.textWarn : styles.textOk,
                   ]}
                 >
-                  {result.calc}
+                  {result.calc} <Text style={styles.unitText}>mOsm/kg</Text>
                 </Text>
               </View>
               {result.gap !== null && (
@@ -378,56 +405,58 @@ export default function CalculatorScreen() {
                 </View>
               )}
 
-              {/* Кнопки вызова AI */}
               <View style={styles.aiActions}>
-                <Text style={styles.aiHint}>Получить интерпретацию:</Text>
-                <View style={styles.aiButtonsRow}>
-                  <TouchableOpacity
-                    style={[styles.aiBtn, styles.aiBtnDoctor]}
-                    onPress={() => fetchInterpretation("doctor")}
-                    disabled={aiLoading}
-                  >
-                    <Text style={styles.aiBtnText}>Для врача</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.aiBtn, styles.aiBtnPatient]}
-                    onPress={() => fetchInterpretation("patient")}
-                    disabled={aiLoading}
-                  >
-                    <Text style={styles.aiBtnText}>Для пациента</Text>
-                  </TouchableOpacity>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: 10,
+                  }}
+                >
+                  <Text style={styles.aiHint}>AI Интерпретация</Text>
+                  {userRole && (
+                    <View style={styles.roleBadge}>
+                      <Text style={styles.roleBadgeText}>
+                        {userRole === "doctor"
+                          ? "Режим врача"
+                          : "Режим пациента"}
+                      </Text>
+                    </View>
+                  )}
                 </View>
+                <TouchableOpacity
+                  style={styles.aiBtnSingle}
+                  onPress={fetchInterpretation}
+                  disabled={aiLoading}
+                >
+                  <Ionicons
+                    name="sparkles"
+                    size={20}
+                    color="#fff"
+                    style={{ marginRight: 8 }}
+                  />
+                  <Text style={styles.aiBtnTextSingle}>
+                    {aiLoading ? "Анализирую..." : "Получить анализ"}
+                  </Text>
+                </TouchableOpacity>
               </View>
 
-              {aiLoading && (
-                <ActivityIndicator
-                  style={{ marginTop: 10 }}
-                  size="small"
-                  color="#007AFF"
-                />
-              )}
-
-              {/* Блок ответа AI */}
               {aiResult && (
                 <View style={styles.aiCard}>
                   <Text style={styles.aiTitle}>
                     {aiResult.context === "doctor"
-                      ? "👨‍⚕️ Мнение (Врач)"
-                      : "🧑‍🦱 Справка (Пациент)"}
+                      ? "ИИ интерпретация"
+                      : "ИИ интерпретация"}
                   </Text>
-
                   <Text style={styles.aiSummary}>{aiResult.summary}</Text>
-
-                  {/* Интерпретация */}
                   <Text style={styles.aiHeader}>Основные выводы:</Text>
                   {aiResult.interpretation?.map((txt: string, i: number) => (
                     <Text key={`int-${i}`} style={styles.bullet}>
                       • {txt}
                     </Text>
                   ))}
-
-                  {/* Красные флаги */}
-                  {aiResult.red_flags && aiResult.red_flags.length > 0 && (
+                  {aiResult.red_flags?.length > 0 && (
                     <>
                       <Text style={[styles.aiHeader, { color: "#D32F2F" }]}>
                         Тревожные признаки:
@@ -439,7 +468,6 @@ export default function CalculatorScreen() {
                       ))}
                     </>
                   )}
-
                   <Text style={styles.disclaimer}>
                     ⚠️ {aiResult.limitations}
                   </Text>
@@ -466,6 +494,31 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     color: "#000",
   },
+
+  // Styles for Toggle
+  toggleContainer: {
+    flexDirection: "row",
+    backgroundColor: "#E5E5EA",
+    borderRadius: 8,
+    padding: 2,
+    marginBottom: 16,
+  },
+  toggleBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: "center",
+    borderRadius: 6,
+  },
+  toggleBtnActive: {
+    backgroundColor: "#fff",
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  toggleText: { fontSize: 13, fontWeight: "600", color: "#8E8E93" },
+  toggleTextActive: { color: "#000" },
+
   card: {
     backgroundColor: "#fff",
     borderRadius: 12,
@@ -473,7 +526,6 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   divider: { height: 1, backgroundColor: "#E5E5EA", marginVertical: 12 },
-
   calcButton: {
     backgroundColor: "#007AFF",
     borderRadius: 12,
@@ -482,7 +534,6 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   calcButtonText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
-
   resultContainer: { backgroundColor: "#fff", borderRadius: 12, padding: 16 },
   resultRow: {
     flexDirection: "row",
@@ -492,24 +543,35 @@ const styles = StyleSheet.create({
   },
   resultLabel: { fontSize: 16, color: "#333" },
   resultValue: { fontSize: 20, fontWeight: "bold" },
+  unitText: { fontSize: 16, fontWeight: "normal", color: "#666" },
   textOk: { color: "#34C759" },
   textWarn: { color: "#FF9500" },
   textDanger: { color: "#FF3B30" },
 
-  // AI Styles
   aiActions: {
     marginTop: 16,
     borderTopWidth: 1,
     borderTopColor: "#eee",
     paddingTop: 12,
   },
-  aiHint: { fontSize: 14, color: "#666", marginBottom: 8 },
-  aiButtonsRow: { flexDirection: "row", gap: 10 },
-  aiBtn: { flex: 1, padding: 10, borderRadius: 8, alignItems: "center" },
-  aiBtnDoctor: { backgroundColor: "#E3F2FD" },
-  aiBtnPatient: { backgroundColor: "#F3E5F5" },
-  aiBtnText: { color: "#333", fontWeight: "600", fontSize: 14 },
-
+  aiHint: { fontSize: 16, fontWeight: "600", color: "#333" },
+  roleBadge: {
+    backgroundColor: "#E5E5EA",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  roleBadgeText: { fontSize: 12, color: "#666", fontWeight: "500" },
+  aiBtnSingle: {
+    flexDirection: "row",
+    backgroundColor: "#5856D6",
+    borderRadius: 12,
+    paddingVertical: 12,
+    justifyContent: "center",
+    alignItems: "center",
+    marginTop: 8,
+  },
+  aiBtnTextSingle: { color: "#fff", fontWeight: "bold", fontSize: 16 },
   aiCard: {
     marginTop: 16,
     padding: 12,
@@ -545,7 +607,6 @@ const styles = StyleSheet.create({
     marginTop: 12,
     textAlign: "center",
   },
-
   clearBtn: { marginTop: 16, alignItems: "center" },
   clearBtnText: { color: "#007AFF" },
 });

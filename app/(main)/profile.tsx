@@ -6,13 +6,20 @@ import { useAuth } from '../../contexts/AuthProvider';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 
+const ROLE_TRANSLATION: Record<string, string> = {
+  doctor: 'Врач',
+  patient: 'Пациент',
+  nurse: 'Медсестра',
+  admin: 'Администратор'
+};
+
 export default function ProfileScreen() {
   const { session } = useAuth();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [profile, setProfile] = useState<any>(null);
 
-  // Загрузка дополнительных данных профиля (если есть)
+  // Загрузка данных профиля
   useEffect(() => {
     if (session?.user) {
       fetchProfile();
@@ -31,7 +38,7 @@ export default function ProfileScreen() {
         setProfile(data);
       }
     } catch (e) {
-      // Игнорируем ошибку, если профиля нет, покажем просто email
+      console.log('Ошибка загрузки профиля', e);
     }
   };
 
@@ -41,8 +48,13 @@ export default function ProfileScreen() {
     if (error) {
       Alert.alert('Ошибка', error.message);
     }
-    // Роутинг обработается автоматически через AuthProvider и RootLayout
+    // AuthProvider сам перекинет на экран входа
     setLoading(false);
+  };
+
+  const getUserRoleLabel = () => {
+    if (!profile?.role) return 'Загрузка...';
+    return ROLE_TRANSLATION[profile.role] || profile.role;
   };
 
   return (
@@ -52,8 +64,8 @@ export default function ProfileScreen() {
           <Ionicons name="person" size={40} color="#fff" />
         </View>
         <Text style={styles.email}>{session?.user.email}</Text>
-        <Text style={styles.role}>
-          {profile?.full_name || 'Врач приёмного отделения'}
+        <Text style={styles.roleSub}>
+          {profile?.full_name || 'Пользователь'}
         </Text>
       </View>
 
@@ -61,7 +73,7 @@ export default function ProfileScreen() {
         <Text style={styles.sectionTitle}>Аккаунт</Text>
         
         <View style={styles.infoRow}>
-          <Text style={styles.label}>ID Пользователя</Text>
+          <Text style={styles.label}>ID</Text>
           <Text style={styles.value} numberOfLines={1} ellipsizeMode="middle">
             {session?.user.id}
           </Text>
@@ -69,7 +81,8 @@ export default function ProfileScreen() {
         
         <View style={styles.infoRow}>
           <Text style={styles.label}>Роль</Text>
-          <Text style={styles.value}>Doctor</Text>
+          {/* ИСПРАВЛЕНО: Теперь берем из базы и переводим */}
+          <Text style={styles.valueBold}>{getUserRoleLabel()}</Text>
         </View>
       </View>
 
@@ -85,7 +98,7 @@ export default function ProfileScreen() {
         )}
       </TouchableOpacity>
       
-      <Text style={styles.version}>Версия приложения: 1.0.0 (MVP)</Text>
+      <Text style={styles.version}>Версия приложения: 1.0.1</Text>
     </View>
   );
 }
@@ -99,13 +112,14 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 5
   },
   email: { fontSize: 20, fontWeight: 'bold', color: '#000' },
-  role: { fontSize: 16, color: '#8E8E93', marginTop: 4 },
+  roleSub: { fontSize: 16, color: '#8E8E93', marginTop: 4 },
   
   section: { backgroundColor: '#fff', borderRadius: 12, padding: 16, marginBottom: 20 },
   sectionTitle: { fontSize: 13, fontWeight: '600', color: '#8E8E93', marginBottom: 12, textTransform: 'uppercase' },
   infoRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, borderBottomWidth: 0.5, borderBottomColor: '#E5E5EA' },
   label: { fontSize: 16, color: '#000' },
   value: { fontSize: 16, color: '#8E8E93', maxWidth: '60%' },
+  valueBold: { fontSize: 16, fontWeight: '600', color: '#007AFF' },
   
   logoutBtn: { 
     backgroundColor: '#fff', borderRadius: 12, padding: 16, alignItems: 'center',

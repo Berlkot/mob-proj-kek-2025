@@ -108,7 +108,7 @@ export default function CaseDetailsScreen() {
       {aiData ? (
         <View style={styles.aiCard}>
           <Text style={styles.aiTitle}>
-            🤖 Анализ AI ({aiData.context === 'doctor' ? 'Врач' : 'Пациент'})
+            Анализ AI
           </Text>
           
           <Text style={styles.aiSummary}>{aiData.summary}</Text>
