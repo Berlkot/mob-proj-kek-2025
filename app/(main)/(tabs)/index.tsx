@@ -323,7 +323,7 @@ export default function CalculatorScreen() {
 
           <View style={styles.card}>
             <ValidatedInput
-              label="Na+"
+              label="Na"
               value={values.na}
               onChangeText={(t) => handleChange("na", t)}
               onBlur={() => handleBlur("na")}
