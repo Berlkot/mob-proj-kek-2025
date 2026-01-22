@@ -14,6 +14,7 @@ import {
   UIManager,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { saveToQueue } from "../../../lib/offline-queue";
 import { Stack } from "expo-router"; // Для настройки заголовка
 import { Ionicons } from "@expo/vector-icons";
 
@@ -37,7 +38,7 @@ if (
 }
 
 export default function CalculatorScreen() {
-  const { session } = useAuth();
+  const { session, isGuest, isConnected } = useAuth();
   const [loading, setLoading] = useState(false);
   const [userRole, setUserRole] = useState<"doctor" | "patient" | null>(null);
 
@@ -160,6 +161,7 @@ export default function CalculatorScreen() {
   };
 
   const handleCalculate = async () => {
+    // 1. Валидация (без лоадера)
     if (!values.na || !values.glucose || !values.bun) {
       Alert.alert("Внимание", "Введите Натрий, Глюкозу и Мочевину");
       return;
@@ -168,59 +170,102 @@ export default function CalculatorScreen() {
       Alert.alert("Ошибка данных", "Проверьте поля, выделенные красным");
       return;
     }
-    setLoading(true);
+
+    // 2. Локальный расчёт (Мгновенно)
+    const valNa = parseFloat(values.na);
+    const valGlu = parseFloat(values.glucose);
+    const valBun = parseFloat(values.bun);
+    const valEth = values.ethanol ? parseFloat(values.ethanol) : 0;
+    const valMeasured = values.measured_osmolality ? parseFloat(values.measured_osmolality) : null;
+
+    const calculatedOsm = calculateOsmolality(valNa, valGlu, valBun, valEth, units);
+    const gap = valMeasured ? calculateGap(valMeasured, calculatedOsm) : null;
+
+    // Сразу показываем результат
+    setResult({ calc: calculatedOsm, gap });
+
+    // 3. Если это Гость — выходим, ничего не сохраняем, лоадер не нужен
+    if (isGuest) {
+      return;
+    }
+
+    // 4. Если Пользователь — начинаем процесс сохранения
+    setLoading(true); // <--- Включаем лоадер только здесь
+    
     try {
-      const valNa = parseFloat(values.na);
-      const valGlu = parseFloat(values.glucose);
-      const valBun = parseFloat(values.bun);
-      const valEth = values.ethanol ? parseFloat(values.ethanol) : 0;
-      const valMeasured = values.measured_osmolality
-        ? parseFloat(values.measured_osmolality)
-        : null;
-      const calculatedOsm = calculateOsmolality(
-        valNa,
-        valGlu,
-        valBun,
-        valEth,
-        units,
-      );
-      const gap = valMeasured ? calculateGap(valMeasured, calculatedOsm) : null;
-
-      setResult({ calc: calculatedOsm, gap });
-
-      if (session?.user) {
-        // ... (Сохранение в БД без изменений)
-        const { data: caseData, error: caseError } = await supabase
-          .from("cases")
-          .insert({
-            user_id: session.user.id,
-            status: "draft",
-            title: `Пациент ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
-          })
-          .select()
-          .single();
-        if (caseError) throw caseError;
-        setCurrentCaseId(caseData.id);
-        await supabase.from("case_inputs").insert({
-          case_id: caseData.id,
-          units: units,
-          na: valNa,
-          glucose: valGlu,
-          bun: valBun,
-          ethanol: valEth || null,
-          measured_osmolality: valMeasured,
-        });
-        await supabase.from("case_results").insert({
-          case_id: caseData.id,
+      const casePayload = {
+        user_id: session?.user?.id!, // Уверены, что есть, т.к. не гость
+        created_at: new Date().toISOString(),
+        title: `Пациент ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+        input_data: {
+          units, na: valNa, glucose: valGlu, bun: valBun, ethanol: valEth || null, measured_osmolality: valMeasured
+        },
+        result_data: {
           formula_id: units === "mg/dL" ? "2na_glu_bun_us" : "2na_glu_bun_si",
           calculated_osmolality: calculatedOsm,
-          osmolal_gap: gap,
-        });
+          osmolal_gap: gap
+        }
+      };
+
+      if (isConnected) {
+        // --- ОНЛАЙН СОХРАНЕНИЕ ---
+        try {
+          // A. Создаем кейс
+          const { data: caseData, error: caseError } = await supabase.from("cases").insert({
+            user_id: casePayload.user_id,
+            status: "final",
+            title: casePayload.title,
+            created_at: casePayload.created_at
+          }).select().single();
+
+          if (caseError) throw caseError;
+
+          // Запоминаем ID для AI
+          setCurrentCaseId(caseData.id);
+
+          // B. Inputs & Results
+          await supabase.from("case_inputs").insert({ case_id: caseData.id, ...casePayload.input_data });
+          await supabase.from("case_results").insert({ case_id: caseData.id, ...casePayload.result_data });
+
+        } catch (onlineError) {
+          console.log('Online save failed, fallback to offline', onlineError);
+          // Если ошибка сети во время запроса — кидаем в оффлайн
+          throw new Error("NetworkError"); 
+        }
+      } else {
+        // --- ОФФЛАЙН ---
+        // Имитируем ошибку, чтобы попасть в catch блок сохранения в очередь
+        throw new Error("Offline");
       }
+
     } catch (e: any) {
-      Alert.alert("Ошибка", e.message);
+      // Если упало (нет сети или ошибка Supabase) — сохраняем локально
+      console.log('Saving to offline queue due to:', e.message);
+      
+      // Функция из lib/offline-queue.ts
+      await saveToQueue({
+        user_id: session?.user?.id!,
+        created_at: new Date().toISOString(),
+        title: `Пациент ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+        input_data: {
+          units, na: valNa, glucose: valGlu, bun: valBun, ethanol: valEth || null, measured_osmolality: valMeasured
+        },
+        result_data: {
+          formula_id: units === "mg/dL" ? "2na_glu_bun_us" : "2na_glu_bun_si",
+          calculated_osmolality: calculatedOsm,
+          osmolal_gap: gap
+        }
+      });
+      
+      // Не пугаем ошибкой, а уведомляем
+      if (e.message === "Offline" || e.message === "NetworkError") {
+        Alert.alert("Оффлайн режим", "Результат сохранен на устройстве. Синхронизация произойдет при появлении сети.");
+      } else {
+         // Реальная ошибка кода/базы
+         Alert.alert("Ошибка сохранения", "Данные сохранены локально.");
+      }
     } finally {
-      setLoading(false);
+      setLoading(false); // <--- ГАРАНТИРОВАННО ВЫКЛЮЧАЕМ
     }
   };
 
@@ -485,9 +530,14 @@ export default function CalculatorScreen() {
               {/* AI Кнопка */}
               <View style={styles.aiActions}>
                 <TouchableOpacity
-                  style={styles.aiBtnSingle}
+                  style={[
+                    styles.aiBtnSingle,
+                    // Если нет сети или гость — делаем кнопку серой
+                    (!isConnected || isGuest) && { backgroundColor: "#C7C7CC" },
+                  ]}
                   onPress={fetchInterpretation}
-                  disabled={aiLoading}
+                  // Блокируем нажатие
+                  disabled={aiLoading || !isConnected || isGuest}
                 >
                   <Ionicons
                     name="sparkles"
@@ -496,9 +546,13 @@ export default function CalculatorScreen() {
                     style={{ marginRight: 8 }}
                   />
                   <Text style={styles.aiBtnTextSingle}>
-                    {aiLoading
-                      ? "Анализирую..."
-                      : "Интерпретировать результаты"}
+                    {!isConnected
+                      ? "Недоступно без интернета"
+                      : isGuest
+                        ? "Требуется аккаунт"
+                        : aiLoading
+                          ? "Анализирую..."
+                          : "Интерпретировать результаты"}
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -516,11 +570,11 @@ export default function CalculatorScreen() {
                   {aiResult.red_flags?.length > 0 && (
                     <>
                       <Text style={[styles.aiHeader, { color: "#D32F2F" }]}>
-                        ⚠️ Тревожные признаки:
+                        ⚠️ Возможные тревожные признаки:
                       </Text>
                       {aiResult.red_flags.map((txt: string, i: number) => (
                         <Text key={i} style={styles.bulletDanger}>
-                        • {txt}
+                          • {txt}
                         </Text>
                       ))}
                     </>

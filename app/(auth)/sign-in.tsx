@@ -13,12 +13,14 @@ import {
 import { supabase } from "../../lib/supabase";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import { useAuth } from '../../contexts/AuthProvider';
 
 export default function SignIn() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const { loginAsGuest } = useAuth(); 
 
   const signIn = async () => {
     setLoading(true);
@@ -83,6 +85,10 @@ export default function SignIn() {
             <Text style={styles.link}>Создать аккаунт</Text>
           </TouchableOpacity>
         </View>
+        <TouchableOpacity style={styles.guestButton} onPress={loginAsGuest}>
+          <Text style={styles.guestButtonText}>Продолжить без регистрации</Text>
+          <Text style={styles.guestButtonSub}>Без истории и AI-функций</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -109,7 +115,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 16,
   },
-  appName: { fontSize: 28, fontWeight: "900", color: "#fff", marginBottom: 8, textAlign: "center" },
+  appName: {
+    fontSize: 28,
+    fontWeight: "900",
+    color: "#fff",
+    marginBottom: 8,
+    textAlign: "center",
+  },
   appDescription: {
     fontSize: 14,
     color: "rgba(255,255,255,0.9)",
@@ -157,4 +169,15 @@ const styles = StyleSheet.create({
   },
   footerText: { color: "#666", fontSize: 15 },
   link: { color: "#007AFF", fontSize: 15, fontWeight: "600" },
+  guestButton: {
+    marginTop: 30,
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E5E5EA",
+    alignItems: "center",
+    backgroundColor: "#FAFAFA",
+  },
+  guestButtonText: { color: "#333", fontSize: 16, fontWeight: "600" },
+  guestButtonSub: { color: "#8E8E93", fontSize: 12, marginTop: 2 },
 });

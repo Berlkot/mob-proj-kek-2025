@@ -5,7 +5,7 @@ import { AuthProvider, useAuth } from '../contexts/AuthProvider';
 import { View, ActivityIndicator } from 'react-native';
 
 const InitialLayout = () => {
-  const { session, loading } = useAuth();
+  const { session, loading, isGuest } = useAuth(); // Добавили isGuest
   const segments = useSegments();
   const router = useRouter();
 
@@ -14,14 +14,17 @@ const InitialLayout = () => {
 
     const inAuthGroup = segments[0] === '(auth)';
 
-    if (!session && !inAuthGroup) {
-      // Если нет сессии и мы не на экране входа -> на вход
+    // Пользователь авторизован (сессия ИЛИ гость)
+    const isAuthorized = !!session || isGuest;
+
+    if (!isAuthorized && !inAuthGroup) {
+      // Если не авторизован и не на экране входа -> на вход
       router.replace('/(auth)/sign-in');
-    } else if (session && inAuthGroup) {
-      // Если есть сессия и мы на экране входа -> в приложение
+    } else if (isAuthorized && inAuthGroup) {
+      // Если авторизован и на экране входа -> в приложение
       router.replace('/(main)');
     }
-  }, [session, loading, segments]);
+  }, [session, isGuest, loading, segments]);
 
   if (loading) {
     return (

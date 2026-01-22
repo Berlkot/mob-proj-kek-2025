@@ -13,25 +13,41 @@ import {
   Platform,
   Alert,
 } from "react-native";
-import { useLocalSearchParams, Stack } from "expo-router";
+import { useLocalSearchParams, Stack, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../../../lib/supabase";
+import { useAuth } from "../../../contexts/AuthProvider"; // <-- Импорт
 
 export default function CaseDetailsScreen() {
   const { id } = useLocalSearchParams();
+  const router = useRouter();
+  const { isConnected } = useAuth(); // <-- Проверка сети
+
   const [loading, setLoading] = useState(true);
   const [caseData, setCaseData] = useState<any>(null);
+  const [isOfflineError, setIsOfflineError] = useState(false); // <-- Флаг для UI
 
-  // --- Состояние для редактирования ---
+  // Edit State
   const [isEditing, setIsEditing] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     fetchCaseDetails();
-  }, [id]);
+  }, [id, isConnected]); // Перезагружаем, если появился интернет
 
   const fetchCaseDetails = async () => {
+    // Сброс ошибок
+    setIsOfflineError(false);
+
+    // 1. Проверка сети перед запросом
+    if (!isConnected) {
+      setLoading(false);
+      setIsOfflineError(true);
+      return;
+    }
+
+    setLoading(true);
     try {
       const { data, error } = await supabase
         .from("cases")
@@ -48,22 +64,26 @@ export default function CaseDetailsScreen() {
 
       if (error) throw error;
       setCaseData(data);
-    } catch (e) {
+    } catch (e: any) {
+      // Если ошибка всё же случилась (сеть отвалилась в процессе)
       console.error(e);
+      if (e.message?.includes("Network") || e.message?.includes("fetch")) {
+        setIsOfflineError(true);
+      } else {
+        Alert.alert("Ошибка загрузки", "Не удалось получить данные");
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  // --- Логика обновления названия ---
-  const handleEditPress = () => {
-    setNewTitle(caseData?.title || "");
-    setIsEditing(true);
-  };
-
   const handleSaveTitle = async () => {
     if (!newTitle.trim()) {
       Alert.alert("Ошибка", "Название не может быть пустым");
+      return;
+    }
+    if (!isConnected) {
+      Alert.alert("Оффлайн", "Нельзя редактировать записи без интернета");
       return;
     }
 
@@ -76,7 +96,6 @@ export default function CaseDetailsScreen() {
 
       if (error) throw error;
 
-      // Обновляем локальные данные
       setCaseData({ ...caseData, title: newTitle.trim() });
       setIsEditing(false);
     } catch (e: any) {
@@ -86,14 +105,37 @@ export default function CaseDetailsScreen() {
     }
   };
 
-  // --- Хелпер для цвета опасности (Gap) ---
+  // Хелпер цвета
   const getGapColor = (gap: number) => {
     const abs = Math.abs(gap);
-    if (abs > 35) return "#8B0000"; // Бордовый (Критично)
-    if (abs > 20) return "#FF3B30"; // Красный (Опасно)
-    if (abs > 10) return "#FF9500"; // Оранжевый (Внимание)
-    return "#34C759"; // Зеленый (Норма)
+    if (abs > 35) return "#8B0000";
+    if (abs > 20) return "#FF3B30";
+    if (abs > 10) return "#FF9500";
+    return "#34C759";
   };
+  const getOsmColor = (val: number) => {
+    if (val < 275) return "#007AFF";
+    if (val > 295) return "#FF3B30";
+    return "#34C759"; // Зеленый если норма
+  };
+
+  // --- UI: ЗАГЛУШКА ОФФЛАЙН ---
+  if (isOfflineError) {
+    return (
+      <View style={styles.center}>
+        <Stack.Screen options={{ title: "Нет связи" }} />
+        <Ionicons name="cloud-offline-outline" size={64} color="#C7C7CC" />
+        <Text style={styles.errorTitle}>Нет подключения</Text>
+        <Text style={styles.errorText}>
+          Детальная информация хранится на сервере. Подключитесь к интернету,
+          чтобы просмотреть запись.
+        </Text>
+        <TouchableOpacity style={styles.retryBtn} onPress={fetchCaseDetails}>
+          <Text style={styles.retryText}>Попробовать снова</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   if (loading) {
     return (
@@ -118,7 +160,6 @@ export default function CaseDetailsScreen() {
     ? caseData.case_results[0]
     : caseData.case_results;
 
-  // Берем последнюю интерпретацию
   const interpretations = caseData.llm_interpretations || [];
   const llmRecord =
     interpretations.length > 0
@@ -127,37 +168,37 @@ export default function CaseDetailsScreen() {
             new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
         )[0]
       : null;
-
   const aiData = llmRecord ? llmRecord.result_json : null;
 
   return (
     <View style={{ flex: 1, backgroundColor: "#F2F2F7" }}>
-      {/* Настройка заголовка с кнопкой редактирования */}
       <Stack.Screen
         options={{
           title: caseData.title || "Детали",
           headerRight: () => (
-            <TouchableOpacity onPress={handleEditPress} style={{ padding: 8 }}>
+            <TouchableOpacity
+              onPress={() => {
+                setNewTitle(caseData.title || "");
+                setIsEditing(true);
+              }}
+              style={{ padding: 8 }}
+            >
               <Ionicons name="pencil" size={24} color="#007AFF" />
             </TouchableOpacity>
           ),
         }}
       />
 
-      <ScrollView
-        style={styles.container}
-        contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
-      >
+      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         <Text style={styles.date}>
           {new Date(caseData.created_at).toLocaleString("ru-RU")}
         </Text>
 
-        {/* 1. Результаты */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Результаты</Text>
           <View style={styles.row}>
-            <Text style={styles.label}>Осмоляльность (Расч.)</Text>
-            <Text style={styles.valueBig}>
+            <Text style={styles.label}>Осмоляльность</Text>
+            <Text style={[styles.valueBig , { color: getOsmColor(results?.calculated_osmolality) }]}>
               {results?.calculated_osmolality}{" "}
               <Text style={styles.unit}>mOsm/kg</Text>
             </Text>
@@ -169,7 +210,6 @@ export default function CaseDetailsScreen() {
               <View style={styles.row}>
                 <View>
                   <Text style={styles.label}>Осмоляльный разрыв</Text>
-                  {/* Текстовая расшифровка статуса */}
                   <Text
                     style={{
                       fontSize: 12,
@@ -195,7 +235,6 @@ export default function CaseDetailsScreen() {
                   <Text
                     style={[
                       styles.unit,
-                      { color: getGapColor(results.osmolal_gap) },
                     ]}
                   >
                     mOsm/kg
@@ -206,7 +245,6 @@ export default function CaseDetailsScreen() {
           )}
         </View>
 
-        {/* 2. Входные данные (Полные названия) */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>
             Входные данные ({inputs?.units})
@@ -238,24 +276,20 @@ export default function CaseDetailsScreen() {
           )}
         </View>
 
-        {/* 3. AI (Стиль из вашего примера) */}
-        {aiData ? (
+        {aiData && (
           <View style={styles.aiCard}>
             <Text style={styles.aiTitle}>ИИ интерпретация</Text>
-
             <Text style={styles.aiSummary}>{aiData.summary}</Text>
-
             <Text style={styles.aiSectionHeader}>Интерпретация:</Text>
             {aiData.interpretation?.map((t: string, i: number) => (
               <Text key={i} style={styles.bullet}>
                 • {t}
               </Text>
             ))}
-
-            {aiData.red_flags && aiData.red_flags.length > 0 && (
+            {aiData.red_flags?.length > 0 && (
               <>
                 <Text style={[styles.aiSectionHeader, { color: "#D32F2F" }]}>
-                  ⚠️ Тревожные признаки:
+                  ⚠️Возможные тревожные признаки:
                 </Text>
                 {aiData.red_flags.map((t: string, i: number) => (
                   <Text key={i} style={styles.bulletDanger}>
@@ -264,21 +298,14 @@ export default function CaseDetailsScreen() {
                 ))}
               </>
             )}
-
             <Text style={styles.disclaimer}>
               Ограничения: {aiData.limitations}
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.emptyAi}>
-            <Text style={styles.emptyAiText}>
-              Интерпретация ИИ не запрашивалась.
             </Text>
           </View>
         )}
       </ScrollView>
 
-      {/* --- МОДАЛЬНОЕ ОКНО РЕДАКТИРОВАНИЯ --- */}
+      {/* Modal Edit */}
       <Modal
         animationType="fade"
         transparent={true}
@@ -291,7 +318,6 @@ export default function CaseDetailsScreen() {
         >
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Переименовать запись</Text>
-
             <TextInput
               style={styles.modalInput}
               value={newTitle}
@@ -299,7 +325,6 @@ export default function CaseDetailsScreen() {
               placeholder="Например: Пациент Иванов"
               autoFocus={true}
             />
-
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={[styles.modalBtn, styles.modalBtnCancel]}
@@ -308,7 +333,6 @@ export default function CaseDetailsScreen() {
               >
                 <Text style={styles.modalBtnTextCancel}>Отмена</Text>
               </TouchableOpacity>
-
               <TouchableOpacity
                 style={[styles.modalBtn, styles.modalBtnSave]}
                 onPress={handleSaveTitle}
@@ -352,9 +376,13 @@ const InfoRow = ({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#F2F2F7" },
-  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
   date: { color: "#8E8E93", textAlign: "center", marginBottom: 16 },
-
   card: {
     backgroundColor: "#fff",
     borderRadius: 12,
@@ -368,22 +396,15 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     textTransform: "uppercase",
   },
-
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
   divider: { height: 1, backgroundColor: "#E5E5EA", marginVertical: 12 },
-
   label: { fontSize: 16, color: "#000" },
   valueBig: { fontSize: 24, fontWeight: "bold" },
   unit: { fontSize: 16, fontWeight: "normal", color: "#8E8E93" },
-
-  // Цвета перенесены в функцию getGapColor, здесь базовые
-  textOk: { color: "#34C759" },
-  textDanger: { color: "#FF3B30" },
-
   infoRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -393,8 +414,6 @@ const styles = StyleSheet.create({
   },
   infoLabel: { fontSize: 16, color: "#333" },
   infoValue: { fontSize: 16, fontWeight: "500", color: "#000" },
-
-  // --- Стили AI из примера ---
   aiCard: {
     backgroundColor: "#F0F9FF",
     borderRadius: 12,
@@ -430,10 +449,29 @@ const styles = StyleSheet.create({
     fontStyle: "italic",
   },
 
-  emptyAi: { alignItems: "center", padding: 20 },
-  emptyAiText: { color: "#8E8E93" },
+  // Оффлайн заглушка
+  errorTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginTop: 16,
+    color: "#333",
+  },
+  errorText: {
+    textAlign: "center",
+    color: "#666",
+    marginTop: 8,
+    marginBottom: 24,
+    paddingHorizontal: 20,
+  },
+  retryBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    backgroundColor: "#F2F2F7",
+    borderRadius: 8,
+  },
+  retryText: { color: "#007AFF", fontWeight: "600" },
 
-  // --- Styles for Modal ---
+  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.5)",

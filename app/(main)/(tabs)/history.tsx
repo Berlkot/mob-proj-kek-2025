@@ -17,6 +17,7 @@ import {
 import { useFocusEffect, useRouter, useNavigation } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../../../lib/supabase";
+import { useAuth } from "../../../contexts/AuthProvider";
 
 type HistoryItem = {
   id: string;
@@ -32,6 +33,7 @@ type DateFilterType = "all" | "today" | "week" | "month";
 export default function HistoryScreen() {
   const router = useRouter();
   const navigation = useNavigation();
+const { isGuest, isConnected, loading: authLoading } = useAuth();
 
   // --- Состояние Данных ---
   const [items, setItems] = useState<HistoryItem[]>([]);
@@ -48,7 +50,6 @@ export default function HistoryScreen() {
   const [dateFilter, setDateFilter] = useState<DateFilterType>("all");
   const [minOsm, setMinOsm] = useState("");
   const [maxOsm, setMaxOsm] = useState("");
-
   // --- Управление Заголовком (Header) ---
   useEffect(() => {
     if (isSelectionMode) {
@@ -89,25 +90,28 @@ export default function HistoryScreen() {
 
   // --- Загрузка данных ---
   const fetchHistory = async () => {
+    if (authLoading) return;
+
+    if (isGuest) return;
+
+    if (!isConnected) {
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
+
     setLoading(true);
     try {
       const hasValueFilter = minOsm || maxOsm;
-
       let query = supabase
         .from("cases")
         .select(
-          `
-          id, created_at, title,
-          case_results${hasValueFilter ? "!inner" : ""} (calculated_osmolality, osmolal_gap),
-          case_inputs (units)
-        `,
+          `id, created_at, title, case_results${hasValueFilter ? "!inner" : ""} (calculated_osmolality, osmolal_gap), case_inputs (units)`,
         )
         .order("created_at", { ascending: false });
 
-      // Фильтры
       if (searchQuery.trim())
         query = query.ilike("title", `%${searchQuery.trim()}%`);
-
       const now = new Date();
       if (dateFilter === "today")
         query = query.gte(
@@ -124,7 +128,6 @@ export default function HistoryScreen() {
           "created_at",
           new Date(now.getTime() - 30 * 864e5).toISOString(),
         );
-
       if (minOsm)
         query = query.gte(
           "case_results.calculated_osmolality",
@@ -147,11 +150,11 @@ export default function HistoryScreen() {
     }
   };
 
-  useFocusEffect(
+useFocusEffect(
     useCallback(() => {
-      // Не обновляем список автоматически, если пользователь что-то выделяет, чтобы не сбить выделение
-      if (!isSelectionMode) fetchHistory();
-    }, [isSelectionMode]),
+      // Запускаем только если авторизация завершена
+      if (!isSelectionMode && !authLoading) fetchHistory();
+    }, [isSelectionMode, isConnected, authLoading]) // Добавили authLoading
   );
 
   // --- Логика Выделения ---
@@ -229,6 +232,19 @@ export default function HistoryScreen() {
     setRefreshing(true);
     fetchHistory();
   };
+  const getGapColor = (gap: number) => {
+    const abs = Math.abs(gap);
+    if (abs > 35) return "#8B0000";
+    if (abs > 20) return "#FF3B30";
+    if (abs > 10) return "#FF9500";
+    return "#34C759";
+  };
+
+  const getOsmColor = (val: number) => {
+    if (val < 275) return "#007AFF";
+    if (val > 295) return "#FF3B30";
+    return "#34C759"; // Зеленый если норма
+  };
 
   // --- Рендер ---
   const renderItem = ({ item }: { item: HistoryItem }) => {
@@ -245,14 +261,10 @@ export default function HistoryScreen() {
       minute: "2-digit",
     });
 
-    // Определение цвета для Gap (безопасность)
-    const gap = result.osmolal_gap;
-    let gapColor = "#34C759"; // Зеленый
-    if (gap && Math.abs(gap) > 35)
-      gapColor = "#8B0000"; // Бордовый
-    else if (gap && Math.abs(gap) > 20)
-      gapColor = "#FF3B30"; // Красный
-    else if (gap && Math.abs(gap) > 10) gapColor = "#FF9500"; // Оранжевый
+    // Цвета
+    const gapColor = getGapColor(result.osmolal_gap);
+    // Для осмоляльности можно просто черный, или раскрасить
+    const osmColor = getOsmColor(result.calculated_osmolality);
 
     return (
       <TouchableOpacity
@@ -261,7 +273,6 @@ export default function HistoryScreen() {
         onPress={() => handlePress(item.id)}
         style={[styles.card, isSelected && styles.cardSelected]}
       >
-        {/* Индикатор выбора */}
         {isSelectionMode && (
           <View style={styles.selectionIndicator}>
             <Ionicons
@@ -271,7 +282,6 @@ export default function HistoryScreen() {
             />
           </View>
         )}
-
         <View style={{ flex: 1 }}>
           <View style={styles.cardHeader}>
             <Text style={styles.date}>{date}</Text>
@@ -279,19 +289,18 @@ export default function HistoryScreen() {
               {item.title || "Без названия"}
             </Text>
           </View>
-
           <View style={styles.cardBody}>
             <View style={styles.resultBlock}>
               <Text style={styles.resultLabel}>Osm</Text>
-              <Text style={styles.resultValue}>
-                {result.calculated_osmolality}
-                <Text style={styles.unit}> mOsm/kg</Text>
+              <Text style={[styles.resultValue, { color: osmColor }]}>
+                {result.calculated_osmolality}{" "}
+                <Text style={styles.unit}>mOsm/kg</Text>
               </Text>
             </View>
-
             {result.osmolal_gap !== null && (
               <View style={[styles.resultBlock, { alignItems: "flex-end" }]}>
                 <Text style={styles.resultLabel}>Gap</Text>
+                {/* ПРИМЕНЯЕМ ЦВЕТ */}
                 <Text style={[styles.resultValue, { color: gapColor }]}>
                   {result.osmolal_gap}
                 </Text>
@@ -299,7 +308,6 @@ export default function HistoryScreen() {
             )}
           </View>
         </View>
-
         {!isSelectionMode && (
           <Ionicons
             name="chevron-forward"
@@ -312,9 +320,50 @@ export default function HistoryScreen() {
     );
   };
 
+  if (isGuest) {
+    return (
+      <View style={styles.center}>
+        <Ionicons name="lock-closed-outline" size={64} color="#C7C7CC" />
+        <Text
+          style={{
+            fontSize: 20,
+            fontWeight: "bold",
+            marginTop: 20,
+            color: "#333",
+          }}
+        >
+          История недоступна
+        </Text>
+        <Text
+          style={{
+            textAlign: "center",
+            marginHorizontal: 40,
+            marginTop: 10,
+            color: "#666",
+          }}
+        >
+          Чтобы сохранять результаты расчётов, пожалуйста, войдите в аккаунт.
+        </Text>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       {/* Панель Поиска (Скрываем при выделении, чтобы не мешала) */}
+      {!isConnected && (
+        <View
+          style={{
+            backgroundColor: "#FFEBEE",
+            padding: 8,
+            alignItems: "center",
+          }}
+        >
+          <Text style={{ color: "#D32F2F", fontSize: 12 }}>
+            Нет подключения к интернету. Показаны старые данные.
+          </Text>
+        </View>
+      )}
       {!isSelectionMode && (
         <View style={styles.searchContainer}>
           <View style={styles.searchInputWrapper}>
@@ -358,13 +407,21 @@ export default function HistoryScreen() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              if (isConnected) fetchHistory();
+              else setRefreshing(false);
+            }}
+          />
         }
         ListEmptyComponent={
           !loading ? (
             <View style={styles.emptyState}>
               <Ionicons name="search-outline" size={48} color="#C7C7CC" />
-              <Text style={styles.emptyText}>Ничего не найдено</Text>
+              <Text style={styles.emptyText}>
+                {isConnected ? "Ничего не найдено" : "Нет данных (оффлайн)"}
+              </Text>
             </View>
           ) : null
         }
@@ -606,4 +663,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   applyBtnText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
 });

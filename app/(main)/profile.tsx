@@ -14,7 +14,7 @@ const ROLE_TRANSLATION: Record<string, string> = {
 };
 
 export default function ProfileScreen() {
-  const { session } = useAuth();
+    const { session, logout, isGuest } = useAuth(); 
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [profile, setProfile] = useState<any>(null);
@@ -59,16 +59,18 @@ export default function ProfileScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <View style={styles.avatar}>
-          <Ionicons name="person" size={40} color="#fff" />
-        </View>
-        <Text style={styles.email}>{session?.user.email}</Text>
-        <Text style={styles.roleSub}>
-          {profile?.full_name || 'Пользователь'}
-        </Text>
-      </View>
-
+  <View style={styles.header}>
+    <View style={[styles.avatar, isGuest && { backgroundColor: '#8E8E93' }]}>
+      <Ionicons name={isGuest ? "person-outline" : "person"} size={40} color="#fff" />
+    </View>
+    <Text style={styles.email}>
+      {isGuest ? 'Гостевой режим' : session?.user.email}
+    </Text>
+    {!isGuest && (
+       <Text style={styles.roleSub}>{profile?.full_name}</Text>
+    )}
+  </View>
+  {!isGuest ? (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Аккаунт</Text>
         
@@ -85,16 +87,24 @@ export default function ProfileScreen() {
           <Text style={styles.valueBold}>{getUserRoleLabel()}</Text>
         </View>
       </View>
-
-      <TouchableOpacity 
+  ) : (
+    <View style={styles.section}>
+       <Text style={{textAlign: 'center', color: '#666'}}>
+         В гостевом режиме данные не сохраняются.
+       </Text>
+    </View>
+  )}
+<TouchableOpacity 
         style={styles.logoutBtn} 
-        onPress={handleSignOut}
+        onPress={() => logout()} // Используем метод из AuthProvider
         disabled={loading}
       >
         {loading ? (
           <ActivityIndicator color="#FF3B30" />
         ) : (
-          <Text style={styles.logoutText}>Выйти из аккаунта</Text>
+          <Text style={styles.logoutText}>
+            {isGuest ? "Войти в аккаунт" : "Выйти из аккаунта"}
+          </Text>
         )}
       </TouchableOpacity>
       
