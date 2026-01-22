@@ -10,8 +10,11 @@ import {
   Text,
   TouchableOpacity,
   View,
+  LayoutAnimation,
+  UIManager,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Stack } from "expo-router"; // Для настройки заголовка
 import { Ionicons } from "@expo/vector-icons";
 
 import { ValidatedInput } from "../../../components/ui/ValidatedInput";
@@ -25,17 +28,24 @@ import { useAuth } from "../../../contexts/AuthProvider";
 import { supabase } from "../../../lib/supabase";
 import { UnitType } from "../../../types/db";
 
+// Включаем анимацию для Android
+if (
+  Platform.OS === "android" &&
+  UIManager.setLayoutAnimationEnabledExperimental
+) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
 export default function CalculatorScreen() {
   const { session } = useAuth();
   const [loading, setLoading] = useState(false);
-
-  // Профиль пользователя (роль)
   const [userRole, setUserRole] = useState<"doctor" | "patient" | null>(null);
 
-  // --- Состояние формы ---
-  const [units, setUnits] = useState<UnitType>("mg/dL");
+  // --- Настройки ---
+  const [units, setUnits] = useState<UnitType>("mmol/L"); // По умолчанию СИ
+  const [showAdvanced, setShowAdvanced] = useState(false); // Свернуть/развернуть доп. поля
 
-  // Значения
+  // --- Значения ---
   const [values, setValues] = useState({
     na: "",
     glucose: "",
@@ -49,11 +59,12 @@ export default function CalculatorScreen() {
     calc: number;
     gap: number | null;
   } | null>(null);
+
   const [currentCaseId, setCurrentCaseId] = useState<string | null>(null);
   const [aiResult, setAiResult] = useState<any>(null);
   const [aiLoading, setAiLoading] = useState(false);
 
-  // 1. Загружаем роль
+  // 1. Загрузка роли
   useEffect(() => {
     if (session?.user) fetchUserRole();
   }, [session]);
@@ -64,16 +75,10 @@ export default function CalculatorScreen() {
       .select("role")
       .eq("id", session?.user.id)
       .single();
-
-    if (data?.role) {
-      const role = data.role === "patient" ? "patient" : "doctor";
-      setUserRole(role);
-    } else {
-      setUserRole("doctor");
-    }
+    setUserRole(data?.role === "patient" ? "patient" : "doctor");
   };
 
-  // Сброс
+  // Сброс при смене единиц
   useEffect(() => {
     setErrors({});
     setResult(null);
@@ -81,64 +86,34 @@ export default function CalculatorScreen() {
     setCurrentCaseId(null);
   }, [units]);
 
-  // --- AI ---
-  const fetchInterpretation = async () => {
-    if (!currentCaseId) {
-      Alert.alert("Ошибка", "Сначала выполните расчёт");
-      return;
-    }
-    const context = userRole || "doctor";
-    setAiLoading(true);
-    setAiResult(null);
-
-    try {
-      const payload = {
-        context: context,
-        units: units,
-        inputs: {
-          Na: values.na,
-          Glucose: values.glucose,
-          BUN: values.bun,
-          Ethanol: values.ethanol || null,
-          Measured_osmolality: values.measured_osmolality || null,
-        },
-        results: {
-          Calculated_osmolality: result?.calc,
-          Osmolal_gap: result?.gap,
-        },
-      };
-
-      const { data, error } = await supabase.functions.invoke(
-        "osmolality-interpret",
-        { body: payload }
-      );
-
-      if (error) throw new Error(error.message || "Ошибка вызова AI");
-      if (data && data.error) throw new Error(data.error);
-
-      if (session?.user) {
-        await supabase.from("llm_interpretations").insert({
-          case_id: currentCaseId,
-          user_id: session.user.id,
-          context: context,
-          model: "nvidia/nemotron-3-nano-30b-a3b:free",
-          result_json: data,
-          status: "ok",
-        });
-      }
-      setAiResult(data);
-    } catch (e: any) {
-      Alert.alert("Ошибка AI", e.message);
-    } finally {
-      setAiLoading(false);
-    }
+  // --- Вспомогательные функции UI ---
+  const toggleAdvanced = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setShowAdvanced(!showAdvanced);
   };
 
-  // --- Validation & Calc ---
+  // Определение цвета для Разрыва (более опасный цвет при больших отклонениях)
+  const getGapSeverity = (gap: number) => {
+    const absGap = Math.abs(gap);
+    if (absGap <= 10) return { color: "#34C759", label: "Норма" }; // Зеленый
+    if (absGap <= 20)
+      return { color: "#FF9500", label: "Умеренное отклонение" }; // Оранжевый
+    if (absGap <= 35) return { color: "#FF3B30", label: "Высокий риск" }; // Красный
+    return { color: "#8B0000", label: "Критическое значение" }; // Темно-красный (Бордовый)
+  };
+
+  // Определение цвета для Осмолярности
+  const getOsmSeverity = (val: number) => {
+    if (val < OSMOLALITY_REF_RANGE.min) return "#007AFF"; // Синий (гипо)
+    if (val > OSMOLALITY_REF_RANGE.max) return "#FF3B30"; // Красный (гипер)
+    return "#34C759"; // Зеленый
+  };
+
+  // --- Логика (сокращена, т.к. не менялась функционально) ---
   const handleVerifyField = (
     key: string,
     text: string,
-    isBlur: boolean = false
+    isBlur: boolean = false,
   ) => {
     const limitGroup = SAFETY_LIMITS[key as keyof typeof SAFETY_LIMITS];
     // @ts-ignore
@@ -150,14 +125,10 @@ export default function CalculatorScreen() {
     const num = parseFloat(text);
     if (isNaN(num)) return;
     let errorMsg: string | null = null;
-    if (num > limit.max) errorMsg = `Макс: ${limit.max}`;
-    else if (num < limit.min && isBlur) errorMsg = `Мин: ${limit.min}`;
+    if (num > limit.max) errorMsg = `Максимум: ${limit.max}`;
+    else if (num < limit.min && isBlur) errorMsg = `Минимум: ${limit.min}`;
     if (num >= limit.min && num <= limit.max) errorMsg = null;
-    setErrors((prev) => {
-      if (prev[key] === errorMsg) return prev;
-      if (!isBlur && num < limit.min && prev[key]) return prev;
-      return { ...prev, [key]: errorMsg };
-    });
+    setErrors((prev) => ({ ...prev, [key]: errorMsg }));
   };
 
   const handleChange = (key: string, text: string) => {
@@ -190,11 +161,11 @@ export default function CalculatorScreen() {
 
   const handleCalculate = async () => {
     if (!values.na || !values.glucose || !values.bun) {
-      Alert.alert("Внимание", "Введите Na, Глюкозу и Мочевину");
+      Alert.alert("Внимание", "Введите Натрий, Глюкозу и Мочевину");
       return;
     }
     if (!validateOnSubmit()) {
-      Alert.alert("Ошибка данных", "Проверьте красные поля");
+      Alert.alert("Ошибка данных", "Проверьте поля, выделенные красным");
       return;
     }
     setLoading(true);
@@ -211,22 +182,20 @@ export default function CalculatorScreen() {
         valGlu,
         valBun,
         valEth,
-        units
+        units,
       );
       const gap = valMeasured ? calculateGap(valMeasured, calculatedOsm) : null;
 
       setResult({ calc: calculatedOsm, gap });
 
       if (session?.user) {
+        // ... (Сохранение в БД без изменений)
         const { data: caseData, error: caseError } = await supabase
           .from("cases")
           .insert({
             user_id: session.user.id,
             status: "draft",
-            title: `Пациент ${new Date().toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}`,
+            title: `Пациент ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
           })
           .select()
           .single();
@@ -249,9 +218,53 @@ export default function CalculatorScreen() {
         });
       }
     } catch (e: any) {
-      Alert.alert("Ошибка сохранения", e.message);
+      Alert.alert("Ошибка", e.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchInterpretation = async () => {
+    if (!currentCaseId) return;
+    const context = userRole || "doctor";
+    setAiLoading(true);
+    setAiResult(null);
+    try {
+      const payload = {
+        context,
+        units,
+        inputs: {
+          Na: values.na,
+          Glucose: values.glucose,
+          BUN: values.bun,
+          Ethanol: values.ethanol || null,
+          Measured_osmolality: values.measured_osmolality || null,
+        },
+        results: {
+          Calculated_osmolality: result?.calc,
+          Osmolal_gap: result?.gap,
+        },
+      };
+      const { data, error } = await supabase.functions.invoke(
+        "osmolality-interpret",
+        { body: payload },
+      );
+      if (error) throw new Error(error.message);
+      if (session?.user) {
+        await supabase.from("llm_interpretations").insert({
+          case_id: currentCaseId,
+          user_id: session.user.id,
+          context,
+          model: "nvidia/nemotron-3-nano-30b-a3b:free",
+          result_json: data,
+          status: "ok",
+        });
+      }
+      setAiResult(data);
+    } catch (e: any) {
+      Alert.alert("Ошибка AI", e.message);
+    } finally {
+      setAiLoading(false);
     }
   };
 
@@ -269,11 +282,16 @@ export default function CalculatorScreen() {
     setErrors({});
   };
 
-  const isAbnormal = (val: number) =>
-    val < OSMOLALITY_REF_RANGE.min || val > OSMOLALITY_REF_RANGE.max;
-
   return (
     <SafeAreaView style={styles.container}>
+      {/* Настройка заголовка экрана */}
+      <Stack.Screen
+        options={{
+          title: "Калькулятор осмолярности",
+          headerTitleAlign: "center",
+        }}
+      />
+
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
@@ -282,26 +300,8 @@ export default function CalculatorScreen() {
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
         >
-          <Text style={styles.headerTitle}>Осмолярность</Text>
-
-          {/* --- ВОССТАНОВЛЕННЫЙ ПЕРЕКЛЮЧАТЕЛЬ --- */}
+          {/* Переключатель Единиц (SI по умолчанию) */}
           <View style={styles.toggleContainer}>
-            <TouchableOpacity
-              style={[
-                styles.toggleBtn,
-                units === "mg/dL" && styles.toggleBtnActive,
-              ]}
-              onPress={() => setUnits("mg/dL")}
-            >
-              <Text
-                style={[
-                  styles.toggleText,
-                  units === "mg/dL" && styles.toggleTextActive,
-                ]}
-              >
-                mg/dL (US)
-              </Text>
-            </TouchableOpacity>
             <TouchableOpacity
               style={[
                 styles.toggleBtn,
@@ -315,15 +315,32 @@ export default function CalculatorScreen() {
                   units === "mmol/L" && styles.toggleTextActive,
                 ]}
               >
-                mmol/L (SI)
+                Система СИ (mmol/L)
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.toggleBtn,
+                units === "mg/dL" && styles.toggleBtnActive,
+              ]}
+              onPress={() => setUnits("mg/dL")}
+            >
+              <Text
+                style={[
+                  styles.toggleText,
+                  units === "mg/dL" && styles.toggleTextActive,
+                ]}
+              >
+                США (mg/dL)
               </Text>
             </TouchableOpacity>
           </View>
-          {/* ------------------------------------- */}
 
+          {/* Карточка ввода Основных параметров */}
           <View style={styles.card}>
+            <Text style={styles.cardTitle}>Базовые параметры</Text>
             <ValidatedInput
-              label="Na"
+              label="Натрий"
               value={values.na}
               onChangeText={(t) => handleChange("na", t)}
               onBlur={() => handleBlur("na")}
@@ -341,7 +358,7 @@ export default function CalculatorScreen() {
               error={errors.glucose}
             />
             <ValidatedInput
-              label={units === "mg/dL" ? "BUN" : "Мочевина"}
+              label="Мочевина"
               value={values.bun}
               onChangeText={(t) => handleChange("bun", t)}
               onBlur={() => handleBlur("bun")}
@@ -349,25 +366,51 @@ export default function CalculatorScreen() {
               placeholder={units === "mg/dL" ? "15" : "5.4"}
               error={errors.bun}
             />
-            <ValidatedInput
-              label="Этанол"
-              value={values.ethanol}
-              onChangeText={(t) => handleChange("ethanol", t)}
-              onBlur={() => handleBlur("ethanol")}
-              unitLabel={units}
-              placeholder="0"
-              error={errors.ethanol}
-            />
-            <View style={styles.divider} />
-            <ValidatedInput
-              label="Измер. Осм."
-              value={values.measured_osmolality}
-              onChangeText={(t) => handleChange("measured_osmolality", t)}
-              onBlur={() => handleBlur("measured_osmolality")}
-              unitLabel="mOsm/kg"
-              placeholder="285"
-              error={errors.measured_osmolality}
-            />
+          </View>
+
+          {/* Опциональные параметры (Dropdown) */}
+          <View style={styles.card}>
+            <TouchableOpacity
+              style={styles.accordionHeader}
+              onPress={toggleAdvanced}
+            >
+              <Text style={styles.cardTitle}>Дополнительно (Разрыв)</Text>
+              <Ionicons
+                name={showAdvanced ? "chevron-up" : "chevron-down"}
+                size={20}
+                color="#007AFF"
+              />
+            </TouchableOpacity>
+
+            {showAdvanced && (
+              <View style={{ marginTop: 12 }}>
+                <ValidatedInput
+                  label="Этанол"
+                  value={values.ethanol}
+                  onChangeText={(t) => handleChange("ethanol", t)}
+                  onBlur={() => handleBlur("ethanol")}
+                  unitLabel={units}
+                  placeholder="0"
+                  error={errors.ethanol}
+                />
+                <View style={styles.divider} />
+                <ValidatedInput
+                  label="Измеренная осмолярность"
+                  value={values.measured_osmolality}
+                  onChangeText={(t) => handleChange("measured_osmolality", t)}
+                  onBlur={() => handleBlur("measured_osmolality")}
+                  unitLabel="mOsm/kg"
+                  placeholder="285"
+                  error={errors.measured_osmolality}
+                />
+              </View>
+            )}
+            {!showAdvanced && (
+              <Text style={styles.hintText}>
+                Нажмите, чтобы ввести этанол или измеренную осмолярность для
+                расчёта разрыва.
+              </Text>
+            )}
           </View>
 
           <TouchableOpacity
@@ -375,56 +418,72 @@ export default function CalculatorScreen() {
             onPress={handleCalculate}
             disabled={loading}
           >
-            <Text style={styles.calcButtonText}>РАССЧИТАТЬ</Text>
+            {loading ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.calcButtonText}>РАССЧИТАТЬ ПОКАЗАТЕЛИ</Text>
+            )}
           </TouchableOpacity>
 
+          {/* Результаты */}
           {result && (
             <View style={styles.resultContainer}>
+              {/* Расчетная */}
               <View style={styles.resultRow}>
-                <Text style={styles.resultLabel}>Расчётная</Text>
+                <View>
+                  <Text style={styles.resultLabel}>Расчётная осмолярность</Text>
+                  <Text style={styles.resultSub}>
+                    Норма: {OSMOLALITY_REF_RANGE.min}–{OSMOLALITY_REF_RANGE.max}
+                  </Text>
+                </View>
                 <Text
                   style={[
                     styles.resultValue,
-                    isAbnormal(result.calc) ? styles.textWarn : styles.textOk,
+                    { color: getOsmSeverity(result.calc) },
                   ]}
                 >
                   {result.calc} <Text style={styles.unitText}>mOsm/kg</Text>
                 </Text>
               </View>
-              {result.gap !== null && (
+
+              <View style={styles.divider} />
+
+              {/* Разрыв (Gap) */}
+              {result.gap !== null ? (
                 <View style={styles.resultRow}>
-                  <Text style={styles.resultLabel}>Разрыв</Text>
+                  <View>
+                    <Text style={styles.resultLabel}>Осмоляльный разрыв</Text>
+                    <Text
+                      style={[
+                        styles.resultSub,
+                        {
+                          color: getGapSeverity(result.gap).color,
+                          fontWeight: "600",
+                        },
+                      ]}
+                    >
+                      {getGapSeverity(result.gap).label}
+                    </Text>
+                  </View>
                   <Text
                     style={[
                       styles.resultValue,
-                      result.gap > 10 ? styles.textDanger : styles.textOk,
+                      { color: getGapSeverity(result.gap).color },
                     ]}
                   >
-                    {result.gap}
+                    {result.gap > 0 ? `+${result.gap}` : result.gap}{" "}
+                    <Text style={styles.unitText}>mOsm/kg</Text>
                   </Text>
                 </View>
+              ) : (
+                <Text style={styles.missingGapText}>
+                  Для расчёта разрыва введите измеренную осмолярность в доп.
+                  параметрах.
+                </Text>
               )}
 
+              {/* AI Кнопка */}
               <View style={styles.aiActions}>
-                <View
-                  style={{
-                    flexDirection: "row",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: 10,
-                  }}
-                >
-                  <Text style={styles.aiHint}>AI Интерпретация</Text>
-                  {userRole && (
-                    <View style={styles.roleBadge}>
-                      <Text style={styles.roleBadgeText}>
-                        {userRole === "doctor"
-                          ? "Режим врача"
-                          : "Режим пациента"}
-                      </Text>
-                    </View>
-                  )}
-                </View>
                 <TouchableOpacity
                   style={styles.aiBtnSingle}
                   onPress={fetchInterpretation}
@@ -437,33 +496,31 @@ export default function CalculatorScreen() {
                     style={{ marginRight: 8 }}
                   />
                   <Text style={styles.aiBtnTextSingle}>
-                    {aiLoading ? "Анализирую..." : "Получить анализ"}
+                    {aiLoading
+                      ? "Анализирую..."
+                      : "Интерпретировать результаты"}
                   </Text>
                 </TouchableOpacity>
               </View>
 
               {aiResult && (
                 <View style={styles.aiCard}>
-                  <Text style={styles.aiTitle}>
-                    {aiResult.context === "doctor"
-                      ? "ИИ интерпретация"
-                      : "ИИ интерпретация"}
-                  </Text>
+                  <Text style={styles.aiTitle}>Интерпретация ИИ</Text>
                   <Text style={styles.aiSummary}>{aiResult.summary}</Text>
-                  <Text style={styles.aiHeader}>Основные выводы:</Text>
+                  <View style={styles.divider} />
                   {aiResult.interpretation?.map((txt: string, i: number) => (
-                    <Text key={`int-${i}`} style={styles.bullet}>
+                    <Text key={i} style={styles.bullet}>
                       • {txt}
                     </Text>
                   ))}
                   {aiResult.red_flags?.length > 0 && (
                     <>
                       <Text style={[styles.aiHeader, { color: "#D32F2F" }]}>
-                        Тревожные признаки:
+                        ⚠️ Тревожные признаки:
                       </Text>
                       {aiResult.red_flags.map((txt: string, i: number) => (
-                        <Text key={`red-${i}`} style={styles.bulletDanger}>
-                          ⚠️ {txt}
+                        <Text key={i} style={styles.bulletDanger}>
+                        • {txt}
                         </Text>
                       ))}
                     </>
@@ -475,7 +532,7 @@ export default function CalculatorScreen() {
               )}
 
               <TouchableOpacity style={styles.clearBtn} onPress={clearForm}>
-                <Text style={styles.clearBtnText}>Очистить</Text>
+                <Text style={styles.clearBtnText}>Очистить расчёт</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -488,125 +545,149 @@ export default function CalculatorScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#F2F2F7" },
   scrollContent: { padding: 16, paddingBottom: 40 },
-  headerTitle: {
-    fontSize: 24,
-    fontWeight: "bold",
-    marginBottom: 16,
-    color: "#000",
-  },
 
-  // Styles for Toggle
   toggleContainer: {
     flexDirection: "row",
     backgroundColor: "#E5E5EA",
-    borderRadius: 8,
-    padding: 2,
+    borderRadius: 10,
+    padding: 3,
     marginBottom: 16,
   },
   toggleBtn: {
     flex: 1,
     paddingVertical: 8,
     alignItems: "center",
-    borderRadius: 6,
+    borderRadius: 8,
   },
   toggleBtnActive: {
     backgroundColor: "#fff",
     shadowColor: "#000",
     shadowOpacity: 0.1,
     shadowRadius: 2,
-    elevation: 2,
+    elevation: 1,
   },
-  toggleText: { fontSize: 13, fontWeight: "600", color: "#8E8E93" },
-  toggleTextActive: { color: "#000" },
+  toggleText: { fontSize: 13, fontWeight: "500", color: "#8E8E93" },
+  toggleTextActive: { color: "#000", fontWeight: "600" },
 
   card: {
     backgroundColor: "#fff",
-    borderRadius: 12,
-    padding: 16,
+    borderRadius: 16,
+    padding: 20,
     marginBottom: 16,
+    shadowColor: "#000",
+    shadowOpacity: 0.03,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  divider: { height: 1, backgroundColor: "#E5E5EA", marginVertical: 12 },
+  cardTitle: {
+    fontSize: 17,
+    fontWeight: "600",
+    marginBottom: 12,
+    color: "#000",
+  },
+  accordionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  hintText: { fontSize: 13, color: "#8E8E93", marginTop: 4 },
+
+  divider: { height: 1, backgroundColor: "#F2F2F7", marginVertical: 12 },
+
   calcButton: {
     backgroundColor: "#007AFF",
-    borderRadius: 12,
-    paddingVertical: 14,
+    borderRadius: 14,
+    paddingVertical: 16,
     alignItems: "center",
-    marginBottom: 16,
+    marginBottom: 24,
+    shadowColor: "#007AFF",
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
   },
-  calcButtonText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
-  resultContainer: { backgroundColor: "#fff", borderRadius: 12, padding: 16 },
+  calcButtonText: {
+    color: "#fff",
+    fontSize: 17,
+    fontWeight: "bold",
+    letterSpacing: 0.5,
+  },
+
+  resultContainer: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    elevation: 3,
+  },
   resultRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 8,
     alignItems: "center",
-  },
-  resultLabel: { fontSize: 16, color: "#333" },
-  resultValue: { fontSize: 20, fontWeight: "bold" },
-  unitText: { fontSize: 16, fontWeight: "normal", color: "#666" },
-  textOk: { color: "#34C759" },
-  textWarn: { color: "#FF9500" },
-  textDanger: { color: "#FF3B30" },
-
-  aiActions: {
-    marginTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: "#eee",
-    paddingTop: 12,
-  },
-  aiHint: { fontSize: 16, fontWeight: "600", color: "#333" },
-  roleBadge: {
-    backgroundColor: "#E5E5EA",
-    paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 6,
   },
-  roleBadgeText: { fontSize: 12, color: "#666", fontWeight: "500" },
+  resultLabel: { fontSize: 16, color: "#333", fontWeight: "500" },
+  resultSub: { fontSize: 13, color: "#8E8E93", marginTop: 2 },
+  resultValue: { fontSize: 22, fontWeight: "800" },
+  unitText: { fontSize: 14, fontWeight: "600", color: "#8E8E93" },
+  missingGapText: {
+    color: "#8E8E93",
+    fontSize: 13,
+    fontStyle: "italic",
+    textAlign: "center",
+    marginVertical: 8,
+  },
+
+  aiActions: { marginTop: 20 },
   aiBtnSingle: {
     flexDirection: "row",
     backgroundColor: "#5856D6",
     borderRadius: 12,
-    paddingVertical: 12,
+    paddingVertical: 14,
     justifyContent: "center",
     alignItems: "center",
-    marginTop: 8,
   },
   aiBtnTextSingle: { color: "#fff", fontWeight: "bold", fontSize: 16 },
+
   aiCard: {
     marginTop: 16,
-    padding: 12,
-    backgroundColor: "#FAFAFA",
-    borderRadius: 8,
+    padding: 16,
+    backgroundColor: "#Fbfbfd",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: "#eee",
+    borderColor: "#E5E5EA",
   },
   aiTitle: { fontSize: 16, fontWeight: "bold", marginBottom: 8, color: "#333" },
-  aiSummary: {
-    fontSize: 14,
-    fontStyle: "italic",
-    marginBottom: 10,
-    color: "#444",
-  },
+  aiSummary: { fontSize: 15, lineHeight: 22, color: "#333", marginBottom: 12 },
   aiHeader: {
     fontSize: 14,
     fontWeight: "bold",
-    marginTop: 8,
-    marginBottom: 4,
+    marginTop: 12,
+    marginBottom: 6,
     color: "#333",
   },
-  bullet: { fontSize: 14, marginLeft: 4, marginBottom: 2, color: "#444" },
+  bullet: {
+    fontSize: 14,
+    marginLeft: 4,
+    marginBottom: 6,
+    color: "#444",
+    lineHeight: 20,
+  },
   bulletDanger: {
     fontSize: 14,
     marginLeft: 4,
-    marginBottom: 2,
+    marginBottom: 4,
     color: "#D32F2F",
+    fontWeight: "500",
   },
   disclaimer: {
-    fontSize: 11,
+    fontSize: 12,
     color: "#999",
-    marginTop: 12,
+    marginTop: 16,
     textAlign: "center",
   },
-  clearBtn: { marginTop: 16, alignItems: "center" },
-  clearBtnText: { color: "#007AFF" },
+
+  clearBtn: { marginTop: 20, alignItems: "center" },
+  clearBtnText: { color: "#007AFF", fontSize: 15, fontWeight: "500" },
 });

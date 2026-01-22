@@ -12,8 +12,9 @@ import {
   Modal,
   Keyboard,
   TouchableWithoutFeedback,
+  Alert,
 } from "react-native";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useRouter, useNavigation } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../../../lib/supabase";
 
@@ -30,26 +31,66 @@ type DateFilterType = "all" | "today" | "week" | "month";
 
 export default function HistoryScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
 
-  // Данные и UI стейт
+  // --- Состояние Данных ---
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [isFilterVisible, setIsFilterVisible] = useState(false);
 
-  // Стейт фильтров
+  // --- Состояние Выделения и Удаления ---
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+
+  // --- Состояние Фильтров ---
+  const [isFilterVisible, setIsFilterVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [dateFilter, setDateFilter] = useState<DateFilterType>("all");
   const [minOsm, setMinOsm] = useState("");
   const [maxOsm, setMaxOsm] = useState("");
 
-  // Загрузка истории с учетом фильтров
+  // --- Управление Заголовком (Header) ---
+  useEffect(() => {
+    if (isSelectionMode) {
+      // Режим удаления
+      navigation.setOptions({
+        title: `Выбрано: ${selectedIds.length}`,
+        headerLeft: () => (
+          <TouchableOpacity
+            onPress={cancelSelection}
+            style={{ marginLeft: 16 }}
+          >
+            <Text style={{ fontSize: 17, color: "#007AFF" }}>Отмена</Text>
+          </TouchableOpacity>
+        ),
+        headerRight: () => (
+          <TouchableOpacity onPress={confirmDelete} style={{ marginRight: 16 }}>
+            <Ionicons name="trash" size={24} color="#FF3B30" />
+          </TouchableOpacity>
+        ),
+        headerTitleAlign: "center",
+      });
+    } else {
+      // Обычный режим (Настройки профиля)
+      navigation.setOptions({
+        title: "История расчётов",
+        headerLeft: undefined,
+        headerRight: () => (
+          <TouchableOpacity
+            onPress={() => router.push("/(main)/profile")}
+            style={{ marginRight: 16 }}
+          >
+            <Ionicons name="settings-outline" size={24} color="#007AFF" />
+          </TouchableOpacity>
+        ),
+      });
+    }
+  }, [isSelectionMode, selectedIds]);
+
+  // --- Загрузка данных ---
   const fetchHistory = async () => {
     setLoading(true);
     try {
-      // 1. Базовый запрос
-      // Важно: используем !inner для case_results, если фильтруем по значениям,
-      // чтобы исключить кейсы, у которых нет результатов, попадающих в диапазон.
       const hasValueFilter = minOsm || maxOsm;
 
       let query = supabase
@@ -57,54 +98,45 @@ export default function HistoryScreen() {
         .select(
           `
           id, created_at, title,
-          case_results${
-            hasValueFilter ? "!inner" : ""
-          } (calculated_osmolality, osmolal_gap),
+          case_results${hasValueFilter ? "!inner" : ""} (calculated_osmolality, osmolal_gap),
           case_inputs (units)
-        `
+        `,
         )
         .order("created_at", { ascending: false });
 
-      // 2. Поиск по названию (Title)
-      if (searchQuery.trim()) {
+      // Фильтры
+      if (searchQuery.trim())
         query = query.ilike("title", `%${searchQuery.trim()}%`);
-      }
 
-      // 3. Фильтр по дате
       const now = new Date();
-      if (dateFilter === "today") {
-        const startOfDay = new Date(now.setHours(0, 0, 0, 0)).toISOString();
-        query = query.gte("created_at", startOfDay);
-      } else if (dateFilter === "week") {
-        const weekAgo = new Date(
-          now.getTime() - 7 * 24 * 60 * 60 * 1000
-        ).toISOString();
-        query = query.gte("created_at", weekAgo);
-      } else if (dateFilter === "month") {
-        const monthAgo = new Date(
-          now.getTime() - 30 * 24 * 60 * 60 * 1000
-        ).toISOString();
-        query = query.gte("created_at", monthAgo);
-      }
+      if (dateFilter === "today")
+        query = query.gte(
+          "created_at",
+          new Date(now.setHours(0, 0, 0, 0)).toISOString(),
+        );
+      else if (dateFilter === "week")
+        query = query.gte(
+          "created_at",
+          new Date(now.getTime() - 7 * 864e5).toISOString(),
+        );
+      else if (dateFilter === "month")
+        query = query.gte(
+          "created_at",
+          new Date(now.getTime() - 30 * 864e5).toISOString(),
+        );
 
-      // 4. Фильтр по диапазону значений (через связанную таблицу)
-      // Синтаксис Supabase для фильтрации по json/связанным полям специфичен,
-      // но благодаря !inner выше, мы можем фильтровать по колонкам child таблицы.
-      if (minOsm) {
+      if (minOsm)
         query = query.gte(
           "case_results.calculated_osmolality",
-          parseFloat(minOsm)
+          parseFloat(minOsm),
         );
-      }
-      if (maxOsm) {
+      if (maxOsm)
         query = query.lte(
           "case_results.calculated_osmolality",
-          parseFloat(maxOsm)
+          parseFloat(maxOsm),
         );
-      }
 
       const { data, error } = await query.limit(50);
-
       if (error) throw error;
       setItems(data || []);
     } catch (e) {
@@ -115,52 +147,97 @@ export default function HistoryScreen() {
     }
   };
 
-  // Первичная загрузка и обновление при фокусе
   useFocusEffect(
     useCallback(() => {
-      fetchHistory();
-    }, []) // Пустой массив, чтобы не зацикливалось, но обновлялось при входе
+      // Не обновляем список автоматически, если пользователь что-то выделяет, чтобы не сбить выделение
+      if (!isSelectionMode) fetchHistory();
+    }, [isSelectionMode]),
   );
 
-  // Обработчик "Применить фильтры"
+  // --- Логика Выделения ---
+  const handleLongPress = (id: string) => {
+    setIsSelectionMode(true);
+    toggleSelection(id);
+  };
+
+  const handlePress = (id: string) => {
+    if (isSelectionMode) {
+      toggleSelection(id);
+    } else {
+      router.push(`/(main)/case/${id}`);
+    }
+  };
+
+  const toggleSelection = (id: string) => {
+    setSelectedIds((prev) => {
+      const isSelected = prev.includes(id);
+      const newIds = isSelected ? prev.filter((i) => i !== id) : [...prev, id];
+
+      if (newIds.length === 0) setIsSelectionMode(false);
+      return newIds;
+    });
+  };
+
+  const cancelSelection = () => {
+    setIsSelectionMode(false);
+    setSelectedIds([]);
+  };
+
+  const confirmDelete = () => {
+    Alert.alert(
+      "Удалить записи?",
+      `Выбрано элементов: ${selectedIds.length}. Действие необратимо.`,
+      [
+        { text: "Отмена", style: "cancel" },
+        { text: "Удалить", style: "destructive", onPress: deleteSelected },
+      ],
+    );
+  };
+
+  const deleteSelected = async () => {
+    try {
+      const { error } = await supabase
+        .from("cases")
+        .delete()
+        .in("id", selectedIds);
+      if (error) throw error;
+
+      // Удаляем из локального стейта для мгновенного отклика
+      setItems((prev) => prev.filter((item) => !selectedIds.includes(item.id)));
+      cancelSelection();
+    } catch (e: any) {
+      Alert.alert("Ошибка удаления", e.message);
+    }
+  };
+
+  // --- Фильтры UI ---
   const applyFilters = () => {
     setIsFilterVisible(false);
     fetchHistory();
   };
 
-  // Обработчик сброса
   const resetFilters = () => {
     setDateFilter("all");
     setMinOsm("");
     setMaxOsm("");
-    setSearchQuery(""); // Можно оставить поиск, если хотим сбросить только фильтры
+    setSearchQuery("");
     setIsFilterVisible(false);
-    // Небольшая задержка, чтобы стейт успел обновиться перед запросом
-    setTimeout(() => {
-      // Мы вызываем fetchHistory, но он замкнет старые значения стейта из-за замыкания useEffect/Callback?
-      // Нет, вызовем напрямую, но нам нужно передать "чистые" параметры.
-      // Проще всего перезагрузить страницу или просто сбросить стейт и useEffect сработает (если добавить зависимости),
-      // но мы используем ручной вызов.
-      // В данном случае просто сбросим UI, а пользователь нажмет "поиск" или swipe-refresh.
-      // Или вызовем fetchHistory с дефолтными параметрами вручную (рефакторинг fetchHistory нужен для идеала),
-      // но для простоты просто вызовем setRefreshing -> onRefresh.
-      onRefresh();
-    }, 100);
+    setTimeout(() => onRefresh(), 100);
   };
 
   const onRefresh = () => {
     setRefreshing(true);
-    // При pull-to-refresh используем текущие фильтры из стейта
     fetchHistory();
   };
 
-  // --- Рендер Элемента Списка ---
+  // --- Рендер ---
   const renderItem = ({ item }: { item: HistoryItem }) => {
-    const resultData = item.case_results;
-    const result = Array.isArray(resultData) ? resultData[0] : resultData;
+    const result = Array.isArray(item.case_results)
+      ? item.case_results[0]
+      : item.case_results;
+    if (!result) return null;
 
-    if (!result) return null; // Скрываем битые записи
-
+    const isSelected = selectedIds.includes(item.id);
     const date = new Date(item.created_at).toLocaleString("ru-RU", {
       day: "numeric",
       month: "short",
@@ -168,15 +245,39 @@ export default function HistoryScreen() {
       minute: "2-digit",
     });
 
+    // Определение цвета для Gap (безопасность)
+    const gap = result.osmolal_gap;
+    let gapColor = "#34C759"; // Зеленый
+    if (gap && Math.abs(gap) > 35)
+      gapColor = "#8B0000"; // Бордовый
+    else if (gap && Math.abs(gap) > 20)
+      gapColor = "#FF3B30"; // Красный
+    else if (gap && Math.abs(gap) > 10) gapColor = "#FF9500"; // Оранжевый
+
     return (
       <TouchableOpacity
         activeOpacity={0.7}
-        onPress={() => router.push(`/(main)/case/${item.id}`)}
+        onLongPress={() => handleLongPress(item.id)}
+        onPress={() => handlePress(item.id)}
+        style={[styles.card, isSelected && styles.cardSelected]}
       >
-        <View style={styles.card}>
+        {/* Индикатор выбора */}
+        {isSelectionMode && (
+          <View style={styles.selectionIndicator}>
+            <Ionicons
+              name={isSelected ? "checkmark-circle" : "ellipse-outline"}
+              size={24}
+              color={isSelected ? "#007AFF" : "#C7C7CC"}
+            />
+          </View>
+        )}
+
+        <View style={{ flex: 1 }}>
           <View style={styles.cardHeader}>
             <Text style={styles.date}>{date}</Text>
-            <Text style={styles.title}>{item.title || "Без названия"}</Text>
+            <Text style={styles.title} numberOfLines={1}>
+              {item.title || "Без названия"}
+            </Text>
           </View>
 
           <View style={styles.cardBody}>
@@ -191,61 +292,66 @@ export default function HistoryScreen() {
             {result.osmolal_gap !== null && (
               <View style={[styles.resultBlock, { alignItems: "flex-end" }]}>
                 <Text style={styles.resultLabel}>Gap</Text>
-                <Text
-                  style={[
-                    styles.resultValue,
-                    result.osmolal_gap > 10 ? styles.textDanger : styles.textOk,
-                  ]}
-                >
+                <Text style={[styles.resultValue, { color: gapColor }]}>
                   {result.osmolal_gap}
                 </Text>
               </View>
             )}
           </View>
         </View>
+
+        {!isSelectionMode && (
+          <Ionicons
+            name="chevron-forward"
+            size={20}
+            color="#C7C7CC"
+            style={{ marginLeft: 8 }}
+          />
+        )}
       </TouchableOpacity>
     );
   };
 
   return (
     <View style={styles.container}>
-      {/* --- Панель Поиска --- */}
-      <View style={styles.searchContainer}>
-        <View style={styles.searchInputWrapper}>
-          <Ionicons
-            name="search"
-            size={20}
-            color="#8E8E93"
-            style={{ marginRight: 8 }}
-          />
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Поиск по названию..."
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            onSubmitEditing={fetchHistory} // Поиск по Enter
-            returnKeyType="search"
-          />
-          {searchQuery.length > 0 && (
-            <TouchableOpacity
-              onPress={() => {
-                setSearchQuery("");
-                fetchHistory();
-              }}
-            >
-              <Ionicons name="close-circle" size={18} color="#C7C7CC" />
-            </TouchableOpacity>
-          )}
+      {/* Панель Поиска (Скрываем при выделении, чтобы не мешала) */}
+      {!isSelectionMode && (
+        <View style={styles.searchContainer}>
+          <View style={styles.searchInputWrapper}>
+            <Ionicons
+              name="search"
+              size={20}
+              color="#8E8E93"
+              style={{ marginRight: 8 }}
+            />
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Поиск по названию..."
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onSubmitEditing={fetchHistory}
+              returnKeyType="search"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity
+                onPress={() => {
+                  setSearchQuery("");
+                  fetchHistory();
+                }}
+              >
+                <Ionicons name="close-circle" size={18} color="#C7C7CC" />
+              </TouchableOpacity>
+            )}
+          </View>
+          <TouchableOpacity
+            style={styles.filterBtn}
+            onPress={() => setIsFilterVisible(true)}
+          >
+            <Ionicons name="options-outline" size={24} color="#007AFF" />
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity
-          style={styles.filterBtn}
-          onPress={() => setIsFilterVisible(true)}
-        >
-          <Ionicons name="options-outline" size={24} color="#007AFF" />
-        </TouchableOpacity>
-      </View>
+      )}
 
-      {/* --- Список --- */}
       <FlatList
         data={items}
         renderItem={renderItem}
@@ -270,7 +376,7 @@ export default function HistoryScreen() {
         </View>
       )}
 
-      {/* --- Модальное окно Фильтров --- */}
+      {/* Модальное окно Фильтров */}
       <Modal
         animationType="slide"
         transparent={true}
@@ -287,7 +393,6 @@ export default function HistoryScreen() {
                 </TouchableOpacity>
               </View>
 
-              {/* Фильтр Даты */}
               <Text style={styles.filterLabel}>Дата создания</Text>
               <View style={styles.dateFilterContainer}>
                 {(["all", "today", "week", "month"] as const).map((type) => (
@@ -308,16 +413,15 @@ export default function HistoryScreen() {
                       {type === "all"
                         ? "Все"
                         : type === "today"
-                        ? "Сегодня"
-                        : type === "week"
-                        ? "Неделя"
-                        : "Месяц"}
+                          ? "Сегодня"
+                          : type === "week"
+                            ? "Неделя"
+                            : "Месяц"}
                     </Text>
                   </TouchableOpacity>
                 ))}
               </View>
 
-              {/* Фильтр Значений */}
               <Text style={styles.filterLabel}>Осмоляльность (mOsm/kg)</Text>
               <View style={styles.rangeContainer}>
                 <TextInput
@@ -337,7 +441,6 @@ export default function HistoryScreen() {
                 />
               </View>
 
-              {/* Кнопки */}
               <View style={styles.modalActions}>
                 <TouchableOpacity
                   style={styles.resetBtn}
@@ -366,7 +469,7 @@ const styles = StyleSheet.create({
   // Search
   searchContainer: {
     flexDirection: "row",
-    padding: 16,
+    padding: 12,
     backgroundColor: "#fff",
     borderBottomWidth: 1,
     borderBottomColor: "#E5E5EA",
@@ -403,22 +506,32 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 3,
     elevation: 2,
+    flexDirection: "row",
+    alignItems: "center",
   },
+  cardSelected: {
+    backgroundColor: "#E3F2FD",
+    borderColor: "#007AFF",
+    borderWidth: 1,
+  },
+  selectionIndicator: { marginRight: 12 },
+
   cardHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 12,
+    marginBottom: 8,
   },
   date: { color: "#8E8E93", fontSize: 13 },
-  title: { fontWeight: "600", color: "#000" },
+  title: { fontWeight: "600", color: "#000", maxWidth: "65%" },
+
   cardBody: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
   resultBlock: {},
-  resultLabel: { fontSize: 12, color: "#8E8E93", textTransform: "uppercase" },
-  resultValue: { fontSize: 20, fontWeight: "bold", color: "#000" },
+  resultLabel: { fontSize: 11, color: "#8E8E93", textTransform: "uppercase" },
+  resultValue: { fontSize: 18, fontWeight: "bold", color: "#000" },
   unit: { fontSize: 12, fontWeight: "normal", color: "#8E8E93" },
   textOk: { color: "#34C759" },
   textDanger: { color: "#FF3B30" },
@@ -446,7 +559,6 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   modalTitle: { fontSize: 20, fontWeight: "bold" },
-
   filterLabel: {
     fontSize: 16,
     fontWeight: "600",
@@ -465,7 +577,6 @@ const styles = StyleSheet.create({
   dateChipActive: { backgroundColor: "#E3F2FD", borderColor: "#007AFF" },
   dateChipText: { color: "#333" },
   dateChipTextActive: { color: "#007AFF", fontWeight: "600" },
-
   rangeContainer: {
     flexDirection: "row",
     alignItems: "center",
@@ -478,7 +589,6 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     textAlign: "center",
   },
-
   modalActions: { flexDirection: "row", marginTop: 30, gap: 15 },
   resetBtn: {
     flex: 1,

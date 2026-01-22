@@ -41,7 +41,7 @@ export default function CaseDetailsScreen() {
           case_inputs (*),
           case_results (*),
           llm_interpretations (*)
-        `
+        `,
         )
         .eq("id", id)
         .single();
@@ -86,6 +86,15 @@ export default function CaseDetailsScreen() {
     }
   };
 
+  // --- Хелпер для цвета опасности (Gap) ---
+  const getGapColor = (gap: number) => {
+    const abs = Math.abs(gap);
+    if (abs > 35) return "#8B0000"; // Бордовый (Критично)
+    if (abs > 20) return "#FF3B30"; // Красный (Опасно)
+    if (abs > 10) return "#FF9500"; // Оранжевый (Внимание)
+    return "#34C759"; // Зеленый (Норма)
+  };
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -110,20 +119,19 @@ export default function CaseDetailsScreen() {
     : caseData.case_results;
 
   // Берем последнюю интерпретацию
-  // Сортируем на клиенте на всякий случай, если база вернула не по порядку
   const interpretations = caseData.llm_interpretations || [];
   const llmRecord =
     interpretations.length > 0
       ? interpretations.sort(
           (a: any, b: any) =>
-            new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
         )[0]
       : null;
 
   const aiData = llmRecord ? llmRecord.result_json : null;
 
   return (
-    <View style={{ flex: 1 }}>
+    <View style={{ flex: 1, backgroundColor: "#F2F2F7" }}>
       {/* Настройка заголовка с кнопкой редактирования */}
       <Stack.Screen
         options={{
@@ -159,23 +167,46 @@ export default function CaseDetailsScreen() {
             <>
               <View style={styles.divider} />
               <View style={styles.row}>
-                <Text style={styles.label}>Осмоляльный разрыв</Text>
+                <View>
+                  <Text style={styles.label}>Осмоляльный разрыв</Text>
+                  {/* Текстовая расшифровка статуса */}
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      marginTop: 2,
+                      color: getGapColor(results.osmolal_gap),
+                      fontWeight: "500",
+                    }}
+                  >
+                    {Math.abs(results.osmolal_gap) > 10
+                      ? Math.abs(results.osmolal_gap) > 20
+                        ? "Высокий риск"
+                        : "Отклонение"
+                      : "В норме"}
+                  </Text>
+                </View>
                 <Text
                   style={[
                     styles.valueBig,
-                    results.osmolal_gap > 10
-                      ? styles.textDanger
-                      : styles.textOk,
+                    { color: getGapColor(results.osmolal_gap) },
                   ]}
                 >
-                  {results.osmolal_gap}
+                  {results.osmolal_gap}{" "}
+                  <Text
+                    style={[
+                      styles.unit,
+                      { color: getGapColor(results.osmolal_gap) },
+                    ]}
+                  >
+                    mOsm/kg
+                  </Text>
                 </Text>
               </View>
             </>
           )}
         </View>
 
-        {/* 2. Входные данные */}
+        {/* 2. Входные данные (Полные названия) */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>
             Входные данные ({inputs?.units})
@@ -183,22 +214,34 @@ export default function CaseDetailsScreen() {
           <InfoRow label="Натрий (Na)" value={inputs?.na} />
           <InfoRow label="Глюкоза" value={inputs?.glucose} />
           <InfoRow
-            label={inputs?.units === "mg/dL" ? "BUN" : "Мочевина"}
+            label={
+              inputs?.units === "mg/dL" ? "Азот мочевины (BUN)" : "Мочевина"
+            }
             value={inputs?.bun}
           />
-          <InfoRow label="Этанол" value={inputs?.ethanol ?? "-"} />
-          <InfoRow
-            label="Измеренная осм."
-            value={inputs?.measured_osmolality ?? "-"}
-          />
+          {inputs?.ethanol ? (
+            <InfoRow label="Этанол" value={inputs.ethanol} />
+          ) : (
+            <InfoRow label="Этанол" value="Не указан" isDimmed />
+          )}
+          {inputs?.measured_osmolality ? (
+            <InfoRow
+              label="Измеренная осмолярность"
+              value={`${inputs.measured_osmolality} mOsm/kg`}
+            />
+          ) : (
+            <InfoRow
+              label="Измеренная осмолярность"
+              value="Не указана"
+              isDimmed
+            />
+          )}
         </View>
 
-        {/* 3. AI */}
+        {/* 3. AI (Стиль из вашего примера) */}
         {aiData ? (
           <View style={styles.aiCard}>
-            <Text style={styles.aiTitle}>
-              ИИ интерпретация
-            </Text>
+            <Text style={styles.aiTitle}>ИИ интерпретация</Text>
 
             <Text style={styles.aiSummary}>{aiData.summary}</Text>
 
@@ -229,7 +272,7 @@ export default function CaseDetailsScreen() {
         ) : (
           <View style={styles.emptyAi}>
             <Text style={styles.emptyAiText}>
-              Интерпретация AI не запрашивалась.
+              Интерпретация ИИ не запрашивалась.
             </Text>
           </View>
         )}
@@ -285,10 +328,25 @@ export default function CaseDetailsScreen() {
   );
 }
 
-const InfoRow = ({ label, value }: { label: string; value: any }) => (
+const InfoRow = ({
+  label,
+  value,
+  isDimmed,
+}: {
+  label: string;
+  value: any;
+  isDimmed?: boolean;
+}) => (
   <View style={styles.infoRow}>
     <Text style={styles.infoLabel}>{label}</Text>
-    <Text style={styles.infoValue}>{value}</Text>
+    <Text
+      style={[
+        styles.infoValue,
+        isDimmed && { color: "#C7C7CC", fontWeight: "normal" },
+      ]}
+    >
+      {value}
+    </Text>
   </View>
 );
 
@@ -321,19 +379,22 @@ const styles = StyleSheet.create({
   label: { fontSize: 16, color: "#000" },
   valueBig: { fontSize: 24, fontWeight: "bold" },
   unit: { fontSize: 16, fontWeight: "normal", color: "#8E8E93" },
+
+  // Цвета перенесены в функцию getGapColor, здесь базовые
   textOk: { color: "#34C759" },
   textDanger: { color: "#FF3B30" },
 
   infoRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderBottomWidth: 0.5,
     borderBottomColor: "#F2F2F7",
   },
   infoLabel: { fontSize: 16, color: "#333" },
   infoValue: { fontSize: 16, fontWeight: "500", color: "#000" },
 
+  // --- Стили AI из примера ---
   aiCard: {
     backgroundColor: "#F0F9FF",
     borderRadius: 12,
